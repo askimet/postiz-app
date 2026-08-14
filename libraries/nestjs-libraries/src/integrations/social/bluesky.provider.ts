@@ -16,6 +16,7 @@ import {
   RichText,
   AppBskyEmbedVideo,
   AppBskyVideoDefs,
+  AppBskyEmbedExternal,
   AtpAgent,
   BlobRef,
 } from '@atproto/api';
@@ -170,6 +171,132 @@ async function uploadVideo(
     $type: 'app.bsky.embed.video',
     video: blob,
   } satisfies AppBskyEmbedVideo.Main;
+}
+
+interface OpenGraphData {
+  title: string;
+  description: string;
+  image?: string;
+}
+
+async function fetchOpenGraphData(url: string): Promise<OpenGraphData | null> {
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (compatible; Postiz/1.0; +https://postiz.com)',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+      maxRedirects: 5,
+    });
+
+    const html = response.data as string;
+
+    const getMetaContent = (property: string): string | undefined => {
+      const ogMatch = html.match(
+        new RegExp(
+          `<meta[^>]*property=["']og:${property}["'][^>]*content=["']([^"']*)["']`,
+          'i'
+        )
+      ) ||
+        html.match(
+          new RegExp(
+            `<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:${property}["']`,
+            'i'
+          )
+        );
+      if (ogMatch) return ogMatch[1];
+
+      const twitterMatch = html.match(
+        new RegExp(
+          `<meta[^>]*name=["']twitter:${property}["'][^>]*content=["']([^"']*)["']`,
+          'i'
+        )
+      ) ||
+        html.match(
+          new RegExp(
+            `<meta[^>]*content=["']([^"']*)["'][^>]*name=["']twitter:${property}["']`,
+            'i'
+          )
+        );
+      if (twitterMatch) return twitterMatch[1];
+
+      if (property === 'description') {
+        const descMatch = html.match(
+          /<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i
+        ) ||
+          html.match(
+            /<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i
+          );
+        if (descMatch) return descMatch[1];
+      }
+
+      return undefined;
+    };
+
+    let title = getMetaContent('title');
+    if (!title) {
+      const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+      title = titleMatch ? titleMatch[1].trim() : url;
+    }
+
+    const description = getMetaContent('description') || '';
+    const image = getMetaContent('image');
+
+    return {
+      title: title.substring(0, 300),
+      description: description.substring(0, 1000),
+      image,
+    };
+  } catch (error) {
+    console.error('Error fetching Open Graph data:', error);
+    return null;
+  }
+}
+
+function extractFirstUrl(text: string): string | null {
+  const urlRegex = /https?:\/\/[^\s<>\[\]()]+/gi;
+  const match = text.match(urlRegex);
+  return match ? match[0] : null;
+}
+
+async function createExternalEmbed(
+  agent: BskyAgent,
+  url: string
+): Promise<AppBskyEmbedExternal.Main | null> {
+  const ogData = await fetchOpenGraphData(url);
+  if (!ogData) return null;
+
+  let thumbBlob: BlobRef | undefined;
+
+  if (ogData.image) {
+    try {
+      let imageUrl = ogData.image;
+      if (imageUrl.startsWith('//')) {
+        imageUrl = 'https:' + imageUrl;
+      } else if (imageUrl.startsWith('/')) {
+        const urlObj = new URL(url);
+        imageUrl = urlObj.origin + imageUrl;
+      }
+
+      const { buffer } = await reduceImageBySize(imageUrl);
+      const uploadResponse = await agent.uploadBlob(new Blob([buffer]));
+      thumbBlob = uploadResponse.data.blob;
+    } catch (error) {
+      console.error('Error uploading thumbnail for embed card:', error);
+    }
+  }
+
+  return {
+    $type: 'app.bsky.embed.external',
+    external: {
+      uri: url,
+      title: ogData.title,
+      description: ogData.description,
+      ...(thumbBlob ? { thumb: thumbBlob } : {}),
+    },
+  } satisfies AppBskyEmbedExternal.Main;
 }
 
 @Rules(
@@ -364,6 +491,15 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
           },
         })),
       };
+    } else {
+      // No media — check for URLs to create a link preview embed card
+      const firstUrl = extractFirstUrl(firstPost.message);
+      if (firstUrl) {
+        const externalEmbed = await createExternalEmbed(agent, firstUrl);
+        if (externalEmbed) {
+          embed = externalEmbed;
+        }
+      }
     }
 
     return { embed, images };

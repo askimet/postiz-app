@@ -657,7 +657,7 @@ export class InstagramProvider
     const isStory = firstPost.settings.post_type === 'story';
     const isTrialReel = this.assetBoolean(firstPost.settings.is_trial_reel);
     const medias = await Promise.all(
-      firstPost?.media?.map(async (m) => {
+      firstPost?.media?.map(async (m, mediaIndex) => {
         const caption =
           firstPost.media?.length === 1
             ? `&caption=${encodeURIComponent(firstPost.message)}`
@@ -721,9 +721,24 @@ export class InstagramProvider
               )}`
             : ``;
 
+        const isVideo = m.path.indexOf('.mp4') > -1;
+        const tagsForThisImage = firstPost?.settings?.user_tags?.[mediaIndex]?.tags;
+        const userTags =
+          tagsForThisImage?.length && !isVideo && !isStory
+            ? `&user_tags=${encodeURIComponent(
+                JSON.stringify(
+                  tagsForThisImage.map((t) => ({
+                    username: t.label,
+                    x: t.x ?? 0.5,
+                    y: t.y ?? 0.5,
+                  }))
+                )
+              )}`
+            : ``;
+
         const { id: photoId } = await (
           await this.fetch(
-            `https://${type}/v20.0/${id}/media?${mediaType}${isCarousel}${collaborators}${trialParams}${audioConfiguration}&access_token=${accessToken}${caption}`,
+            `https://${type}/v20.0/${id}/media?${mediaType}${isCarousel}${collaborators}${trialParams}${userTags}${audioConfiguration}&access_token=${accessToken}${caption}`,
             {
               method: 'POST',
             }
